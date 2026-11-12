@@ -22,6 +22,7 @@ async function sendNotificationEmail({ session }) {
     <p><strong>Contacto:</strong> ${m.name || "-"} · ${m.phone || "-"} · ${email || "-"}</p>
     <p><strong>Origen:</strong> ${m.origin || "-"}</p>
     <p><strong>Destino:</strong> ${m.destination || "-"}</p>
+    <p><strong>Distancia:</strong> ${m.distanceKm ? m.distanceKm + " km" : "-"}</p>
     <p><strong>Contenido:</strong> ${m.contents || "-"}</p>
     <p><strong>Servicio:</strong> ${m.service || "-"}</p>
     <p><strong>ID de pago Stripe:</strong> ${session.id}</p>
