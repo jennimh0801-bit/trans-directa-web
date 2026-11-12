@@ -25,33 +25,70 @@ function withCity(address, city) {
   return a.toLowerCase().includes(String(city).toLowerCase()) ? a : `${a}, ${city}`;
 }
 
-async function viaGoogle(origin, destination, key) {
-  const url = new URL("https://maps.googleapis.com/maps/api/distancematrix/json");
-  url.searchParams.set("origins", `${origin}, Catalunya, España`);
-  url.searchParams.set("destinations", `${destination}, Catalunya, España`);
-  url.searchParams.set("mode", "driving");
+// Google: Geocoding API (encuentra la dirección) + Routes API (km en coche).
+async function geocodeGoogle(query, key) {
+  const url = new URL("https://maps.googleapis.com/maps/api/geocode/json");
+  url.searchParams.set("address", query);
+  url.searchParams.set("components", "country:ES");
+  // Prioriza resultados dentro de Catalunya.
+  url.searchParams.set("bounds", "40.50,0.15|42.87,3.35");
   url.searchParams.set("region", "es");
   url.searchParams.set("language", "es");
   url.searchParams.set("key", key);
-
   const res = await fetch(url);
   const data = await res.json();
+  if (data.status === "ZERO_RESULTS" || (data.status === "OK" && !data.results?.length)) {
+    throw new DistanceError(`No encontramos «${query}». Añade el número y la población.`);
+  }
   if (data.status !== "OK") {
-    console.error("Google Distance Matrix:", data.status, data.error_message);
+    console.error("Google Geocoding:", data.status, data.error_message);
     throw new Error("Servicio de mapas no disponible.");
   }
-  const el = data.rows?.[0]?.elements?.[0];
-  if (!el || el.status !== "OK") {
-    throw new DistanceError(
-      "No encontramos una de las direcciones. Revisa calle, número y población."
-    );
+  const hit = data.results[0];
+  const region = (hit.address_components || []).find((c) =>
+    (c.types || []).includes("administrative_area_level_1")
+  );
+  return {
+    lat: hit.geometry.location.lat,
+    lng: hit.geometry.location.lng,
+    label: hit.formatted_address,
+    ok: region ? /^(CT|catalu)/i.test(region.short_name) || CAT_WORDS.test(region.long_name) : looksCatalan(hit.formatted_address),
+  };
+}
+
+async function viaGoogle(origin, destination, key) {
+  const a = await geocodeGoogle(origin, key);
+  const b = await geocodeGoogle(destination, key);
+  const point = (p) => ({ location: { latLng: { latitude: p.lat, longitude: p.lng } } });
+  const res = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": key,
+      "X-Goog-FieldMask": "routes.distanceMeters",
+    },
+    body: JSON.stringify({
+      origin: point(a),
+      destination: point(b),
+      travelMode: "DRIVE",
+      routingPreference: "TRAFFIC_UNAWARE",
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    console.error("Google Routes:", res.status, JSON.stringify(data));
+    throw new Error("Servicio de mapas no disponible.");
+  }
+  const meters = data.routes?.[0]?.distanceMeters;
+  if (!meters) {
+    throw new DistanceError("No hemos podido calcular la ruta entre esas direcciones.");
   }
   return {
-    meters: el.distance.value,
-    originLabel: data.origin_addresses[0],
-    destinationLabel: data.destination_addresses[0],
-    originOk: looksCatalan(data.origin_addresses[0]),
-    destinationOk: looksCatalan(data.destination_addresses[0]),
+    meters,
+    originLabel: a.label,
+    destinationLabel: b.label,
+    originOk: a.ok,
+    destinationOk: b.ok,
   };
 }
 
