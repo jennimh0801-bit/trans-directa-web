@@ -131,6 +131,15 @@ exports.handler = async (event) => {
 
     return { statusCode: 200, body: JSON.stringify({ url: session.url }) };
   } catch (err) {
-    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
+    console.error("Stripe error creating checkout session:", err);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error: err.message,
+        param: err.param || null,
+        type: err.type || null,
+        code: err.code || null,
+      }),
+    };
   }
 };
