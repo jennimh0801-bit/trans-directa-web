@@ -1,6 +1,7 @@
 // Netlify Function: crea una sesión de pago de Stripe Checkout con el importe
 // calculado en el SERVIDOR (nunca nos fiamos del importe que mande el navegador).
 const Stripe = require("stripe");
+const { routeDistance, DistanceError } = require("../lib/distance.cjs");
 
 const SERVICE_BASE = { urgente: 15.9, mismodia: 10.9, programado: 8.9 };
 const SIZE_FEE = { sobre: 0, "caja-s": 0, "caja-m": 2.6 };
@@ -35,7 +36,7 @@ function computeGross(input) {
   if (base === undefined || sizeFee === undefined) {
     throw new Error("Servicio o tamaño no válidos.");
   }
-  const distanceKm = Math.min(Math.max(Number(input.distanceKm) || 0, 1), 250);
+  const distanceKm = Math.max(Number(input.distanceKm) || 0, 1);
   const weightKg = Math.min(Math.max(Number(input.weightKg) || 0, 1), 20);
   const extras = Array.isArray(input.extras) ? input.extras : [];
 
@@ -85,9 +86,27 @@ exports.handler = async (event) => {
     return { statusCode: 400, body: JSON.stringify({ error: "Email no válido." }) };
   }
 
+  // Los km se calculan aquí a partir de las direcciones: se ignora cualquier
+  // distancia que venga del navegador.
+  let route;
+  try {
+    route = await routeDistance({ origin, destination, city: data.city });
+  } catch (err) {
+    if (!(err instanceof DistanceError)) console.error("Error calculando distancia:", err);
+    return {
+      statusCode: err instanceof DistanceError ? 422 : 502,
+      body: JSON.stringify({
+        error:
+          err instanceof DistanceError
+            ? err.message
+            : "No hemos podido calcular la distancia. Inténtalo de nuevo.",
+      }),
+    };
+  }
+
   let price;
   try {
-    price = computeGross(data);
+    price = computeGross({ ...data, distanceKm: route.km });
   } catch (err) {
     return { statusCode: 400, body: JSON.stringify({ error: err.message }) };
   }
@@ -109,7 +128,7 @@ exports.handler = async (event) => {
             unit_amount: Math.round(price.gross * 100),
             product_data: {
               name: `Recogida Trans Directa · ${origin} → ${destination}`,
-              description: `Servicio ${service || "urgente"} · ${company}`,
+              description: `Servicio ${service || "urgente"} · ${route.km} km · ${company}`,
             },
           },
         },
@@ -122,6 +141,7 @@ exports.handler = async (event) => {
         destination: String(destination).slice(0, 300),
         contents: String(contents || "").slice(0, 300),
         service: String(service || "urgente"),
+        distanceKm: String(route.km),
         gross: String(price.gross),
         etaMin: String(price.etaMin),
       },

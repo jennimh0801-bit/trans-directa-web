@@ -6,7 +6,6 @@ import {
   EXCLUDED_GOODS,
   EXTRAS,
   IMAGES,
-  MAX_DISTANCE_KM,
   MAX_SIZE_LABEL,
   MAX_WEIGHT_KG,
   OTHER_CITY,
@@ -14,11 +13,17 @@ import {
   SIZES,
   cityLabel,
 } from "@/lib/data";
-import { eur, formatEta, num } from "@/lib/pricing";
+import { computeQuote, eur, formatEta, num } from "@/lib/pricing";
 import { scrollToId, useQuote, useStore } from "@/lib/store";
 import { cn } from "@/utils/cn";
 import { Icon } from "./Icons";
 import { Button, Field, RangeInput, Reveal, inputClass } from "./ui";
+
+type Route =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ok"; km: number; originLabel: string; destinationLabel: string }
+  | { status: "error"; message: string };
 
 const STEPS = [
   { n: 1, label: "Ruta", icon: "pin" },
@@ -36,7 +41,7 @@ type Errors = Record<string, string>;
 
 export function Booking() {
   const { quote, setQuote, toggleExtra, createShipment, pushToast, setActiveId } = useStore();
-  const price = useQuote();
+  const estimate = useQuote();
 
   const [step, setStep] = useState(1);
   const [origin, setOrigin] = useState("");
@@ -60,6 +65,52 @@ export function Booking() {
     email: string;
   } | null>(null);
   const timer = useRef<number | null>(null);
+  const [route, setRoute] = useState<Route>({ status: "idle" });
+  const routeKm = route.status === "ok" ? route.km : null;
+  // Con la ruta calculada, el precio usa los km reales (los mismos que cobra el servidor).
+  const price = routeKm != null ? computeQuote({ ...quote, distanceKm: routeKm }) : estimate;
+
+  // Calcula los km en coche automáticamente cuando el cliente escribe las direcciones.
+  useEffect(() => {
+    const o = origin.trim();
+    const d = destination.trim();
+    if (o.length < 5 || d.length < 5) {
+      setRoute({ status: "idle" });
+      return;
+    }
+    setRoute({ status: "loading" });
+    const ctrl = new AbortController();
+    const handle = window.setTimeout(() => {
+      fetch("/.netlify/functions/route-distance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origin: o, destination: d, city: quote.city }),
+        signal: ctrl.signal,
+      })
+        .then(async (r) => {
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok || typeof data.km !== "number") {
+            throw new Error(data.error || "No hemos podido calcular la distancia.");
+          }
+          setRoute({
+            status: "ok",
+            km: data.km,
+            originLabel: data.originLabel,
+            destinationLabel: data.destinationLabel,
+          });
+          setQuote("distanceKm", data.km);
+        })
+        .catch((err: Error) => {
+          if (err.name === "AbortError") return;
+          setRoute({ status: "error", message: err.message });
+        });
+    }, 900);
+    return () => {
+      window.clearTimeout(handle);
+      ctrl.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [origin, destination, quote.city]);
 
   useEffect(
     () => () => {
@@ -160,6 +211,11 @@ export function Booking() {
     if (target > 1) {
       if (origin.trim().length < 5) e.origin = "Indica la dirección completa de recogida.";
       if (destination.trim().length < 5) e.destination = "Indica la dirección completa de entrega.";
+      if (!e.origin && !e.destination && route.status !== "ok")
+        e.destination =
+          route.status === "error"
+            ? route.message
+            : "Estamos calculando la distancia, espera un momento.";
     }
     if (target > 2) {
       if (quote.service === "programado" && !schedule)
@@ -200,7 +256,6 @@ export function Booking() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         city: quote.city,
-        distanceKm: quote.distanceKm,
         service: quote.service,
         size: quote.size,
         weightKg: quote.weightKg,
@@ -416,16 +471,24 @@ export function Booking() {
                               />
                             </div>
                           </Field>
-                          <Field id="bk-km" label="Distancia" hint={`${num(quote.distanceKm)} km`}>
-                            <div className="pt-2.5">
-                              <RangeInput
-                                id="bk-km"
-                                ariaLabel="Distancia en kilómetros"
-                                min={1}
-                                max={MAX_DISTANCE_KM}
-                                value={quote.distanceKm}
-                                onChange={(v) => setQuote("distanceKm", v)}
-                              />
+                          <Field id="bk-km" label="Distancia" hint="se calcula sola">
+                            <div
+                              id="bk-km"
+                              aria-live="polite"
+                              className={cn(inputClass, "flex items-center gap-2.5")}
+                            >
+                              <Icon name="pin" className="h-4 w-4 shrink-0 text-signal-400" />
+                              {route.status === "ok" ? (
+                                <span className="font-mono font-bold text-bone-50">
+                                  {num(route.km)} km en coche
+                                </span>
+                              ) : route.status === "loading" ? (
+                                <span className="text-mist-400">Calculando la ruta…</span>
+                              ) : route.status === "error" ? (
+                                <span className="text-flare-400">Revisa las direcciones</span>
+                              ) : (
+                                <span className="text-mist-500">Escribe las dos direcciones</span>
+                              )}
                             </div>
                           </Field>
                         </div>
@@ -458,6 +521,25 @@ export function Booking() {
                             className={cn(inputClass, errors.destination && "border-flare-500/70")}
                           />
                         </Field>
+
+                        {route.status === "error" && !errors.destination && (
+                          <p className="-mt-2 flex items-center gap-1.5 text-[0.8rem] font-medium text-flare-400" role="alert">
+                            <Icon name="alert" className="h-3.5 w-3.5 shrink-0" strokeWidth={2} />
+                            {route.message}
+                          </p>
+                        )}
+                        {route.status === "ok" && (
+                          <div className="rounded-2xl border border-mint-500/25 bg-mint-500/5 p-4 text-[0.8rem] leading-relaxed text-mist-300">
+                            <p>
+                              <strong className="font-semibold text-mint-300">Recogida:</strong>{" "}
+                              {route.originLabel}
+                            </p>
+                            <p className="mt-1">
+                              <strong className="font-semibold text-mint-300">Entrega:</strong>{" "}
+                              {route.destinationLabel}
+                            </p>
+                          </div>
+                        )}
 
                         <div className="flex items-start gap-3 rounded-2xl border border-cobalt-500/25 bg-cobalt-700/10 p-4">
                           <Icon name="pin" className="mt-0.5 h-4.5 w-4.5 shrink-0 text-cobalt-300" />
@@ -791,7 +873,9 @@ export function Booking() {
                   <ul className="mt-6 space-y-2.5 border-t border-mist-400/10 pt-5">
                     {[
                       `Recogida en ${cityLabel(quote.city)} lo antes posible`,
-                      `${num(quote.distanceKm)} km · ${num(quote.weightKg)} kg · sin escalas`,
+                      routeKm != null
+                        ? `${num(routeKm)} km · ${num(quote.weightKg)} kg · sin escalas`
+                        : `Distancia orientativa hasta indicar las direcciones · ${num(quote.weightKg)} kg`,
                       "Pago al pedir la recogida, sin cuotas",
                     ].map((t) => (
                       <li key={t} className="flex items-start gap-2.5 text-[0.82rem] text-mist-400">
